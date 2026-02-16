@@ -20,7 +20,8 @@ student-progress-tracker/
 │       ├── database.py            # SQLite schema + queries (10 tables)
 │       └── validators.py          # Input validation functions
 ├── tests/
-│   ├── test_database.py           # Database unit tests (42 tests)
+│   ├── test_database.py           # Database unit tests (57 tests)
+│   ├── test_server.py             # Server tool tests (81 tests)
 │   └── test_validators.py         # Validator unit tests (38 tests)
 ├── data/
 │   └── student_progress.db        # SQLite database (auto-created, gitignored)
@@ -80,6 +81,16 @@ Add to `.claude/settings.json` or project's `.mcp.json`:
 pip install pytest
 pytest tests/ -v
 ```
+
+**176 tests** across 3 files:
+
+| File | Tests | Coverage |
+|------|-------|----------|
+| `test_database.py` | 57 | Database layer: CRUD, analytics, enrollment, retakes, trend detection, CASCADE deletes, edge cases |
+| `test_server.py` | 81 | All 21 MCP tools: validation errors, not-found paths, enrollment checks, success paths, grade letters |
+| `test_validators.py` | 38 | All 9 validator functions: valid inputs, boundary cases, error cases |
+
+Tests use a temp SQLite database via `STUDENT_PROGRESS_DB` env var. The `_clean_db` autouse fixture truncates all tables between tests.
 
 ## MCP Tools (21 total)
 
