@@ -204,11 +204,22 @@ class TestAssessmentOperations:
         assert assessment is not None
         assert assessment["assessment_type"] == "quiz"
 
+    def test_get_assessment_not_found(self):
+        assert db.get_assessment("nonexistent") is None
+
     def test_list_assessments(self, sample_assessment):
         assessments = db.list_assessments("course-001")
         assert len(assessments) == 1
         assert assessments[0]["name"] == "Chapter 1 Quiz"
         assert assessments[0]["results_count"] == 0
+
+    def test_list_assessments_with_results(self, enrolled_student, sample_assessment):
+        db.record_assessment_result(
+            "result-la", "stu-001", "assess-001",
+            points_earned=80, points_possible=100,
+        )
+        assessments = db.list_assessments("course-001")
+        assert assessments[0]["results_count"] == 1
 
     def test_list_assessments_empty(self, sample_course):
         assessments = db.list_assessments("course-001")
@@ -222,6 +233,14 @@ class TestResultRecording:
             points_earned=85, points_possible=100,
         )
         assert result["percentage"] == 85.0
+
+    def test_record_result_with_time(self, enrolled_student, sample_assessment):
+        result = db.record_assessment_result(
+            "result-time", "stu-001", "assess-001",
+            points_earned=80, points_possible=100,
+            time_spent_seconds=1800,
+        )
+        assert result["percentage"] == 80.0
 
     def test_record_result_with_questions(
         self, enrolled_student, sample_assessment, sample_topic
@@ -287,6 +306,55 @@ class TestAnalytics:
         assert profile["name"] == "Alice Johnson"
         assert len(profile["courses"]) == 1
 
+    def test_get_student_profile_not_found(self):
+        assert db.get_student_profile("nonexistent") is None
+
+    def test_get_student_profile_with_assessment(
+        self, enrolled_student, sample_course, sample_assessment
+    ):
+        db.record_assessment_result(
+            "result-prof", "stu-001", "assess-001",
+            points_earned=85, points_possible=100,
+        )
+        profile = db.get_student_profile("stu-001")
+        assert profile["statistics"]["total_assessments"] == 1
+        assert profile["statistics"]["avg_percentage"] == 85.0
+        assert len(profile["recent_assessments"]) == 1
+
+    def test_get_topic_mastery_with_course_filter(
+        self, enrolled_student, sample_assessment, sample_topic
+    ):
+        db.record_assessment_result(
+            "result-mf", "stu-001", "assess-001",
+            points_earned=80, points_possible=100,
+            question_results=[
+                {"question_id": "q1", "topic_id": "topic-001", "is_correct": True},
+            ],
+        )
+        # Filter by the correct course
+        mastery = db.get_topic_mastery("stu-001", "course-001")
+        assert len(mastery) == 1
+        # Filter by a different course returns empty
+        mastery_other = db.get_topic_mastery("stu-001", "course-other")
+        assert len(mastery_other) == 0
+
+    def test_get_student_history_with_topic_filter(
+        self, enrolled_student, sample_assessment, sample_topic
+    ):
+        db.record_assessment_result(
+            "result-hf", "stu-001", "assess-001",
+            points_earned=80, points_possible=100,
+            question_results=[
+                {"question_id": "q1", "topic_id": "topic-001", "is_correct": True},
+            ],
+        )
+        # Filter by existing topic
+        history = db.get_student_history("stu-001", topic_id="topic-001")
+        assert len(history) == 1
+        # Filter by non-existing topic returns empty
+        history_other = db.get_student_history("stu-001", topic_id="topic-other")
+        assert len(history_other) == 0
+
     def test_get_learning_gaps(self, enrolled_student, sample_assessment, sample_topic):
         db.record_assessment_result(
             "result-gap", "stu-001", "assess-001",
@@ -321,6 +389,121 @@ class TestAnalytics:
         analytics = db.get_class_analytics("course-001")
         assert analytics["overall"]["students_assessed"] == 1
         assert analytics["overall"]["avg_percentage"] == 88.0
+
+
+class TestTrendDetection:
+    def test_improving_trend(self, enrolled_student, sample_assessment, sample_topic):
+        """Low initial mastery followed by high accuracy triggers improving trend."""
+        # First attempt: low score (1/3 correct = 0.33 mastery)
+        db.record_assessment_result(
+            "result-t1", "stu-001", "assess-001",
+            points_earned=33, points_possible=100,
+            question_results=[
+                {"question_id": "q1", "topic_id": "topic-001", "is_correct": True},
+                {"question_id": "q2", "topic_id": "topic-001", "is_correct": False},
+                {"question_id": "q3", "topic_id": "topic-001", "is_correct": False},
+            ],
+        )
+        mastery = db.get_topic_mastery("stu-001")
+        assert mastery[0]["trend"] == "stable"  # First attempt is always stable
+
+        # Second assessment with high accuracy (recent_accuracy=1.0 vs mastery=0.33)
+        assess2 = db.create_assessment(
+            "assess-002", "course-001", "Quiz 2", "quiz", 100, 10
+        )
+        db.record_assessment_result(
+            "result-t2", "stu-001", assess2["id"],
+            points_earned=100, points_possible=100,
+            question_results=[
+                {"question_id": "q4", "topic_id": "topic-001", "is_correct": True},
+                {"question_id": "q5", "topic_id": "topic-001", "is_correct": True},
+                {"question_id": "q6", "topic_id": "topic-001", "is_correct": True},
+            ],
+        )
+        mastery = db.get_topic_mastery("stu-001")
+        assert mastery[0]["trend"] == "improving"
+
+    def test_declining_trend(self, enrolled_student, sample_assessment, sample_topic):
+        """High initial mastery followed by low accuracy triggers declining trend."""
+        # First attempt: high score (3/3 correct = 1.0 mastery)
+        db.record_assessment_result(
+            "result-d1", "stu-001", "assess-001",
+            points_earned=100, points_possible=100,
+            question_results=[
+                {"question_id": "q1", "topic_id": "topic-001", "is_correct": True},
+                {"question_id": "q2", "topic_id": "topic-001", "is_correct": True},
+                {"question_id": "q3", "topic_id": "topic-001", "is_correct": True},
+            ],
+        )
+
+        # Second assessment with low accuracy (recent_accuracy=0.0 vs mastery=1.0)
+        assess2 = db.create_assessment(
+            "assess-002", "course-001", "Quiz 2", "quiz", 100, 10
+        )
+        db.record_assessment_result(
+            "result-d2", "stu-001", assess2["id"],
+            points_earned=0, points_possible=100,
+            question_results=[
+                {"question_id": "q4", "topic_id": "topic-001", "is_correct": False},
+                {"question_id": "q5", "topic_id": "topic-001", "is_correct": False},
+                {"question_id": "q6", "topic_id": "topic-001", "is_correct": False},
+            ],
+        )
+        mastery = db.get_topic_mastery("stu-001")
+        assert mastery[0]["trend"] == "declining"
+
+
+class TestAdditionalEdgeCases:
+    def test_create_student_minimal_args(self):
+        student = db.create_student("stu-min", "Minimal Student")
+        assert student["id"] == "stu-min"
+        assert student["name"] == "Minimal Student"
+        assert student["email"] is None
+        assert student["grade_level"] is None
+
+    def test_list_courses_with_student_count(self, enrolled_student, sample_course):
+        courses = db.list_courses()
+        assert courses[0]["student_count"] == 1
+
+    def test_delete_course_cascades_topics(self, sample_course, sample_topic):
+        db.delete_course("course-001")
+        topics = db.list_topics("course-001")
+        assert len(topics) == 0
+
+    def test_delete_course_cascades_assessments(self, sample_course, sample_assessment):
+        db.delete_course("course-001")
+        assert db.get_assessment("assess-001") is None
+
+    def test_get_class_analytics_with_topics(
+        self, enrolled_student, sample_course, sample_assessment, sample_topic
+    ):
+        db.record_assessment_result(
+            "result-ca", "stu-001", "assess-001",
+            points_earned=75, points_possible=100,
+            question_results=[
+                {"question_id": "q1", "topic_id": "topic-001", "is_correct": True},
+                {"question_id": "q2", "topic_id": "topic-001", "is_correct": False},
+            ],
+        )
+        analytics = db.get_class_analytics("course-001")
+        assert len(analytics["by_topic"]) == 1
+        assert analytics["by_topic"][0]["name"] == "Linear Equations"
+        assert analytics["by_topic"][0]["students_attempted"] == 1
+
+    def test_get_learning_gaps_no_gaps(
+        self, enrolled_student, sample_assessment, sample_topic
+    ):
+        """Student above threshold has no gaps."""
+        db.record_assessment_result(
+            "result-ng", "stu-001", "assess-001",
+            points_earned=100, points_possible=100,
+            question_results=[
+                {"question_id": "q1", "topic_id": "topic-001", "is_correct": True},
+                {"question_id": "q2", "topic_id": "topic-001", "is_correct": True},
+            ],
+        )
+        gaps = db.get_learning_gaps("stu-001", 0.7)
+        assert len(gaps) == 0
 
 
 class TestDatabaseConfig:
