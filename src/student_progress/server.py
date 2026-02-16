@@ -14,6 +14,17 @@ from typing import Optional
 from mcp.server.fastmcp import FastMCP
 
 from . import database as db
+from .validators import (
+    ValidationError,
+    validate_limit,
+    validate_non_empty_string,
+    validate_percentage_bounds,
+    validate_points_earned,
+    validate_positive_integer,
+    validate_positive_number,
+    validate_question_results,
+    validate_weight,
+)
 
 # Initialize MCP server
 mcp = FastMCP("Student Progress Tracker")
@@ -40,6 +51,11 @@ def create_student(
     Returns:
         Confirmation with student details
     """
+    try:
+        name = validate_non_empty_string(name, "name")
+    except ValidationError as e:
+        return f"Error: {e.message}"
+
     student_id = f"stu-{uuid.uuid4().hex[:8]}"
 
     student = db.create_student(
@@ -103,7 +119,7 @@ def get_student_profile(student_id: str) -> str:
     profile = db.get_student_profile(student_id)
 
     if not profile:
-        return f"Student not found: {student_id}"
+        return f"Error: Student not found: {student_id}"
 
     stats = profile['statistics']
     avg_pct = stats['avg_percentage']
@@ -142,6 +158,71 @@ def get_student_profile(student_id: str) -> str:
     return result
 
 
+@mcp.tool()
+def update_student(
+    student_id: str,
+    name: Optional[str] = None,
+    email: Optional[str] = None,
+    grade_level: Optional[str] = None,
+) -> str:
+    """
+    Update an existing student's information.
+
+    Args:
+        student_id: The student ID
+        name: New name (optional)
+        email: New email (optional)
+        grade_level: New grade level (optional)
+
+    Returns:
+        Confirmation with updated details
+    """
+    try:
+        if name is not None:
+            name = validate_non_empty_string(name, "name")
+    except ValidationError as e:
+        return f"Error: {e.message}"
+
+    updated = db.update_student(student_id, name=name, email=email, grade_level=grade_level)
+
+    if not updated:
+        return f"Error: Student not found: {student_id}"
+
+    return f"""
+✅ Student Updated!
+
+**ID:** `{updated['id']}`
+**Name:** {updated['name']}
+**Email:** {updated['email'] or 'Not provided'}
+**Grade Level:** {updated['grade_level'] or 'Not specified'}
+"""
+
+
+@mcp.tool()
+def delete_student(student_id: str, confirm: bool = False) -> str:
+    """
+    Delete a student and all related data.
+
+    Args:
+        student_id: The student ID
+        confirm: Must be True to confirm deletion
+
+    Returns:
+        Confirmation of deletion
+    """
+    if not confirm:
+        return ("Error: You must set confirm=True to delete a student."
+                " This will remove all related data.")
+
+    student = db.get_student(student_id)
+    if not student:
+        return f"Error: Student not found: {student_id}"
+
+    db.delete_student(student_id)
+
+    return f"✅ Deleted student **{student['name']}** (`{student_id}`) and all related data."
+
+
 # ============================================================
 # COURSE TOOLS
 # ============================================================
@@ -165,6 +246,12 @@ def create_course(
     Returns:
         Confirmation with course details
     """
+    try:
+        name = validate_non_empty_string(name, "name")
+        subject = validate_non_empty_string(subject, "subject")
+    except ValidationError as e:
+        return f"Error: {e.message}"
+
     course_id = f"course-{uuid.uuid4().hex[:8]}"
 
     course = db.create_course(
@@ -228,18 +315,113 @@ def enroll_student(student_id: str, course_id: str) -> str:
     """
     student = db.get_student(student_id)
     if not student:
-        return f"Student not found: {student_id}"
+        return f"Error: Student not found: {student_id}"
 
     course = db.get_course(course_id)
     if not course:
-        return f"Course not found: {course_id}"
+        return f"Error: Course not found: {course_id}"
 
     success = db.enroll_student(student_id, course_id)
 
     if success:
         return f"✅ Enrolled **{student['name']}** in **{course['name']}**"
     else:
-        return "Student is already enrolled in this course."
+        return "Error: Student is already enrolled in this course."
+
+
+@mcp.tool()
+def unenroll_student(student_id: str, course_id: str) -> str:
+    """
+    Remove a student's enrollment from a course.
+
+    Args:
+        student_id: The student ID
+        course_id: The course ID
+
+    Returns:
+        Confirmation of unenrollment
+    """
+    student = db.get_student(student_id)
+    if not student:
+        return f"Error: Student not found: {student_id}"
+
+    course = db.get_course(course_id)
+    if not course:
+        return f"Error: Course not found: {course_id}"
+
+    success = db.unenroll_student(student_id, course_id)
+
+    if success:
+        return f"✅ Unenrolled **{student['name']}** from **{course['name']}**"
+    else:
+        return "Error: Student is not enrolled in this course."
+
+
+@mcp.tool()
+def update_course(
+    course_id: str,
+    name: Optional[str] = None,
+    subject: Optional[str] = None,
+    grade_level: Optional[str] = None,
+) -> str:
+    """
+    Update an existing course's information.
+
+    Args:
+        course_id: The course ID
+        name: New name (optional)
+        subject: New subject (optional)
+        grade_level: New grade level (optional)
+
+    Returns:
+        Confirmation with updated details
+    """
+    try:
+        if name is not None:
+            name = validate_non_empty_string(name, "name")
+        if subject is not None:
+            subject = validate_non_empty_string(subject, "subject")
+    except ValidationError as e:
+        return f"Error: {e.message}"
+
+    updated = db.update_course(course_id, name=name, subject=subject, grade_level=grade_level)
+
+    if not updated:
+        return f"Error: Course not found: {course_id}"
+
+    return f"""
+✅ Course Updated!
+
+**ID:** `{updated['id']}`
+**Name:** {updated['name']}
+**Subject:** {updated['subject']}
+**Grade Level:** {updated['grade_level'] or 'Not specified'}
+"""
+
+
+@mcp.tool()
+def delete_course(course_id: str, confirm: bool = False) -> str:
+    """
+    Delete a course and all related data.
+
+    Args:
+        course_id: The course ID
+        confirm: Must be True to confirm deletion
+
+    Returns:
+        Confirmation of deletion
+    """
+    if not confirm:
+        return ("Error: You must set confirm=True to delete a course."
+                " This will remove all related data.")
+
+    course = db.get_course(course_id)
+    if not course:
+        return f"Error: Course not found: {course_id}"
+
+    db.delete_course(course_id)
+
+    return f"✅ Deleted course **{course['name']}** (`{course_id}`) and all related data."
 
 
 @mcp.tool()
@@ -259,9 +441,15 @@ def create_topic(
     Returns:
         Confirmation with topic details
     """
+    try:
+        name = validate_non_empty_string(name, "name")
+        weight = validate_weight(weight)
+    except ValidationError as e:
+        return f"Error: {e.message}"
+
     course = db.get_course(course_id)
     if not course:
-        return f"Course not found: {course_id}"
+        return f"Error: Course not found: {course_id}"
 
     topic_id = f"topic-{uuid.uuid4().hex[:8]}"
 
@@ -295,7 +483,7 @@ def list_topics(course_id: str) -> str:
     """
     course = db.get_course(course_id)
     if not course:
-        return f"Course not found: {course_id}"
+        return f"Error: Course not found: {course_id}"
 
     topics = db.list_topics(course_id)
 
@@ -337,13 +525,22 @@ def create_assessment(
     Returns:
         Confirmation with assessment details
     """
+    try:
+        name = validate_non_empty_string(name, "name")
+        total_points = validate_positive_number(total_points, "total_points")
+        total_questions = validate_positive_integer(total_questions, "total_questions")
+        if time_limit_minutes is not None:
+            time_limit_minutes = validate_positive_integer(time_limit_minutes, "time_limit_minutes")
+    except ValidationError as e:
+        return f"Error: {e.message}"
+
     course = db.get_course(course_id)
     if not course:
-        return f"Course not found: {course_id}"
+        return f"Error: Course not found: {course_id}"
 
     valid_types = ['test', 'quiz', 'homework', 'practice']
     if assessment_type not in valid_types:
-        return f"Invalid type. Must be one of: {', '.join(valid_types)}"
+        return f"Error: Invalid type. Must be one of: {', '.join(valid_types)}"
 
     assessment_id = f"assess-{uuid.uuid4().hex[:8]}"
     time_limit_seconds = time_limit_minutes * 60 if time_limit_minutes else None
@@ -369,6 +566,38 @@ def create_assessment(
 **Questions:** {assessment['total_questions']}
 **Time Limit:** {time_limit_minutes or 'None'} minutes
 """
+
+
+@mcp.tool()
+def list_assessments(course_id: str) -> str:
+    """
+    List all assessments for a course.
+
+    Args:
+        course_id: The course ID
+
+    Returns:
+        List of assessments with result counts
+    """
+    course = db.get_course(course_id)
+    if not course:
+        return f"Error: Course not found: {course_id}"
+
+    assessments = db.list_assessments(course_id)
+
+    if not assessments:
+        return f"No assessments in '{course['name']}'. Create one with `create_assessment`."
+
+    result = f"**Assessments in '{course['name']}':**\n\n"
+
+    for a in assessments:
+        result += f"### {a['name']}\n"
+        result += f"- **ID:** `{a['id']}`\n"
+        result += f"- **Type:** {a['assessment_type'].title()}\n"
+        result += f"- **Points:** {a['total_points']} ({a['total_questions']} questions)\n"
+        result += f"- **Results recorded:** {a['results_count']}\n\n"
+
+    return result
 
 
 @mcp.tool()
@@ -400,13 +629,26 @@ def record_assessment_result(
     Returns:
         Result summary with updated mastery levels
     """
+    try:
+        validate_points_earned(points_earned, points_possible)
+        if time_spent_minutes is not None:
+            time_spent_minutes = validate_positive_integer(time_spent_minutes, "time_spent_minutes")
+        if question_results is not None:
+            validate_question_results(question_results)
+    except ValidationError as e:
+        return f"Error: {e.message}"
+
     student = db.get_student(student_id)
     if not student:
-        return f"Student not found: {student_id}"
+        return f"Error: Student not found: {student_id}"
 
     assessment = db.get_assessment(assessment_id)
     if not assessment:
-        return f"Assessment not found: {assessment_id}"
+        return f"Error: Assessment not found: {assessment_id}"
+
+    # Check enrollment
+    if not db.check_enrollment(student_id, assessment_id):
+        return "Error: Student is not enrolled in the course for this assessment."
 
     result_id = f"result-{uuid.uuid4().hex[:8]}"
     time_spent_seconds = time_spent_minutes * 60 if time_spent_minutes else None
@@ -479,7 +721,7 @@ def get_topic_mastery(student_id: str, course_id: Optional[str] = None) -> str:
     """
     student = db.get_student(student_id)
     if not student:
-        return f"Student not found: {student_id}"
+        return f"Error: Student not found: {student_id}"
 
     mastery = db.get_topic_mastery(student_id, course_id)
 
@@ -532,9 +774,14 @@ def get_learning_gaps(student_id: str, threshold: float = 70.0) -> str:
     Returns:
         List of topics below threshold with recommendations
     """
+    try:
+        threshold = validate_percentage_bounds(threshold, "threshold")
+    except ValidationError as e:
+        return f"Error: {e.message}"
+
     student = db.get_student(student_id)
     if not student:
-        return f"Student not found: {student_id}"
+        return f"Error: Student not found: {student_id}"
 
     gaps = db.get_learning_gaps(student_id, threshold / 100)
 
@@ -591,14 +838,19 @@ def get_student_history(
     Args:
         student_id: The student ID
         topic_id: Optional topic ID to filter by
-        limit: Maximum number of records (default 20)
+        limit: Maximum number of records (default 20, max 500)
 
     Returns:
         Question history with performance details
     """
+    try:
+        limit = validate_limit(limit)
+    except ValidationError as e:
+        return f"Error: {e.message}"
+
     student = db.get_student(student_id)
     if not student:
-        return f"Student not found: {student_id}"
+        return f"Error: Student not found: {student_id}"
 
     history = db.get_student_history(student_id, topic_id, limit)
 
@@ -625,7 +877,8 @@ def get_student_history(
     correct_count = sum(1 for h in history if h['is_correct'])
     total = len(history)
 
-    result += f"\n**Summary:** {correct_count}/{total} correct ({correct_count/total*100:.0f}%)\n"
+    pct = (correct_count / total * 100) if total > 0 else 0
+    result += f"\n**Summary:** {correct_count}/{total} correct ({pct:.0f}%)\n"
 
     return result
 
@@ -643,7 +896,7 @@ def get_class_analytics(course_id: str) -> str:
     """
     course = db.get_course(course_id)
     if not course:
-        return f"Course not found: {course_id}"
+        return f"Error: Course not found: {course_id}"
 
     analytics = db.get_class_analytics(course_id)
     overall = analytics['overall']
@@ -700,7 +953,7 @@ def recommend_focus_areas(student_id: str) -> str:
     """
     student = db.get_student(student_id)
     if not student:
-        return f"Student not found: {student_id}"
+        return f"Error: Student not found: {student_id}"
 
     # Get gaps and mastery
     gaps = db.get_learning_gaps(student_id, 0.8)  # Below 80%

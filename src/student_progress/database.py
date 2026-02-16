@@ -4,28 +4,37 @@ Tracks student performance across topics and assessments.
 """
 
 import json
+import logging
+import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-DATABASE_PATH = Path(__file__).parent.parent.parent / "data" / "student_progress.db"
+logger = logging.getLogger(__name__)
+
+_default_path = Path(__file__).parent.parent.parent / "data" / "student_progress.db"
+DATABASE_PATH = Path(os.environ.get("STUDENT_PROGRESS_DB", str(_default_path)))
 
 
 def get_connection():
-    """Get database connection."""
+    """Get database connection with WAL mode and busy timeout."""
+    global _initialized
     DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = sqlite3.connect(str(DATABASE_PATH))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
+    if not _initialized:
+        _do_init(conn)
+        _initialized = True
     return conn
 
 
-def init_database():
-    """Initialize database with schema."""
-    conn = get_connection()
+def _do_init(conn):
+    """Initialize schema on an already-open connection."""
     cursor = conn.cursor()
-
     cursor.executescript("""
         -- Students
         CREATE TABLE IF NOT EXISTS students (
@@ -173,14 +182,21 @@ def init_database():
         CREATE INDEX IF NOT EXISTS idx_mastery_student ON topic_mastery(student_id);
         CREATE INDEX IF NOT EXISTS idx_history_student ON question_history(student_id);
         CREATE INDEX IF NOT EXISTS idx_history_topic ON question_history(topic_id);
+        CREATE INDEX IF NOT EXISTS idx_enrollments_course ON enrollments(course_id);
+        CREATE INDEX IF NOT EXISTS idx_topics_course ON topics(course_id);
+        CREATE INDEX IF NOT EXISTS idx_assessments_course ON assessments(course_id);
     """)
-
     conn.commit()
+    logger.info("Database schema initialized")
+
+
+def init_database():
+    """Initialize database with schema (public API for tests)."""
+    conn = get_connection()
     conn.close()
 
 
-# Initialize on import
-init_database()
+_initialized = False
 
 
 # ============================================================
@@ -191,54 +207,59 @@ def create_student(student_id: str, name: str, email: str = None,
                    grade_level: str = None) -> dict:
     """Create a new student."""
     conn = get_connection()
-    cursor = conn.cursor()
+    try:
+        cursor = conn.cursor()
 
-    cursor.execute("""
-        INSERT INTO students (id, name, email, grade_level)
-        VALUES (?, ?, ?, ?)
-    """, (student_id, name, email, grade_level))
+        cursor.execute("""
+            INSERT INTO students (id, name, email, grade_level)
+            VALUES (?, ?, ?, ?)
+        """, (student_id, name, email, grade_level))
 
-    conn.commit()
-    conn.close()
+        conn.commit()
+        logger.info("Created student %s", student_id)
 
-    return {
-        "id": student_id,
-        "name": name,
-        "email": email,
-        "grade_level": grade_level
-    }
+        return {
+            "id": student_id,
+            "name": name,
+            "email": email,
+            "grade_level": grade_level
+        }
+    finally:
+        conn.close()
 
 
 def get_student(student_id: str) -> Optional[dict]:
     """Get student by ID."""
     conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT * FROM students WHERE id = ?", (student_id,))
-    row = cursor.fetchone()
-    conn.close()
-
-    return dict(row) if row else None
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM students WHERE id = ?", (student_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
 
 
 def list_students(course_id: str = None) -> list:
     """List students, optionally filtered by course enrollment."""
     conn = get_connection()
-    cursor = conn.cursor()
+    try:
+        cursor = conn.cursor()
 
-    if course_id:
-        cursor.execute("""
-            SELECT s.* FROM students s
-            JOIN enrollments e ON e.student_id = s.id
-            WHERE e.course_id = ? AND e.status = 'active'
-            ORDER BY s.name
-        """, (course_id,))
-    else:
-        cursor.execute("SELECT * FROM students ORDER BY name")
+        if course_id:
+            cursor.execute("""
+                SELECT s.* FROM students s
+                JOIN enrollments e ON e.student_id = s.id
+                WHERE e.course_id = ? AND e.status = 'active'
+                ORDER BY s.name
+            """, (course_id,))
+        else:
+            cursor.execute("SELECT * FROM students ORDER BY name")
 
-    rows = cursor.fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
 
 
 # ============================================================
@@ -249,53 +270,58 @@ def create_course(course_id: str, name: str, subject: str,
                   grade_level: str = None, question_bank_id: str = None) -> dict:
     """Create a new course."""
     conn = get_connection()
-    cursor = conn.cursor()
+    try:
+        cursor = conn.cursor()
 
-    cursor.execute("""
-        INSERT INTO courses (id, name, subject, grade_level, question_bank_id)
-        VALUES (?, ?, ?, ?, ?)
-    """, (course_id, name, subject, grade_level, question_bank_id))
+        cursor.execute("""
+            INSERT INTO courses (id, name, subject, grade_level, question_bank_id)
+            VALUES (?, ?, ?, ?, ?)
+        """, (course_id, name, subject, grade_level, question_bank_id))
 
-    conn.commit()
-    conn.close()
+        conn.commit()
+        logger.info("Created course %s", course_id)
 
-    return {
-        "id": course_id,
-        "name": name,
-        "subject": subject,
-        "grade_level": grade_level,
-        "question_bank_id": question_bank_id
-    }
+        return {
+            "id": course_id,
+            "name": name,
+            "subject": subject,
+            "grade_level": grade_level,
+            "question_bank_id": question_bank_id
+        }
+    finally:
+        conn.close()
 
 
 def get_course(course_id: str) -> Optional[dict]:
     """Get course by ID."""
     conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT * FROM courses WHERE id = ?", (course_id,))
-    row = cursor.fetchone()
-    conn.close()
-
-    return dict(row) if row else None
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM courses WHERE id = ?", (course_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
 
 
 def list_courses() -> list:
     """List all courses."""
     conn = get_connection()
-    cursor = conn.cursor()
+    try:
+        cursor = conn.cursor()
 
-    cursor.execute("""
-        SELECT c.*, COUNT(DISTINCT e.student_id) as student_count
-        FROM courses c
-        LEFT JOIN enrollments e ON e.course_id = c.id AND e.status = 'active'
-        GROUP BY c.id
-        ORDER BY c.name
-    """)
+        cursor.execute("""
+            SELECT c.*, COUNT(DISTINCT e.student_id) as student_count
+            FROM courses c
+            LEFT JOIN enrollments e ON e.course_id = c.id AND e.status = 'active'
+            GROUP BY c.id
+            ORDER BY c.name
+        """)
 
-    rows = cursor.fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
 
 
 def enroll_student(student_id: str, course_id: str) -> bool:
@@ -309,6 +335,7 @@ def enroll_student(student_id: str, course_id: str) -> bool:
             VALUES (?, ?)
         """, (student_id, course_id))
         conn.commit()
+        logger.info("Enrolled student %s in course %s", student_id, course_id)
         return True
     except sqlite3.IntegrityError:
         return False
@@ -324,32 +351,37 @@ def create_topic(topic_id: str, course_id: str, name: str,
                  parent_id: str = None, weight: float = 1.0) -> dict:
     """Create a topic for a course."""
     conn = get_connection()
-    cursor = conn.cursor()
+    try:
+        cursor = conn.cursor()
 
-    cursor.execute("""
-        INSERT INTO topics (id, course_id, name, parent_id, weight)
-        VALUES (?, ?, ?, ?, ?)
-    """, (topic_id, course_id, name, parent_id, weight))
+        cursor.execute("""
+            INSERT INTO topics (id, course_id, name, parent_id, weight)
+            VALUES (?, ?, ?, ?, ?)
+        """, (topic_id, course_id, name, parent_id, weight))
 
-    conn.commit()
-    conn.close()
+        conn.commit()
+        logger.info("Created topic %s in course %s", topic_id, course_id)
 
-    return {"id": topic_id, "course_id": course_id, "name": name,
-            "parent_id": parent_id, "weight": weight}
+        return {"id": topic_id, "course_id": course_id, "name": name,
+                "parent_id": parent_id, "weight": weight}
+    finally:
+        conn.close()
 
 
 def list_topics(course_id: str) -> list:
     """List topics for a course."""
     conn = get_connection()
-    cursor = conn.cursor()
+    try:
+        cursor = conn.cursor()
 
-    cursor.execute("""
-        SELECT * FROM topics WHERE course_id = ? ORDER BY name
-    """, (course_id,))
+        cursor.execute("""
+            SELECT * FROM topics WHERE course_id = ? ORDER BY name
+        """, (course_id,))
 
-    rows = cursor.fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
 
 
 # ============================================================
@@ -361,38 +393,41 @@ def create_assessment(assessment_id: str, course_id: str, name: str,
                       total_questions: int, time_limit_seconds: int = None) -> dict:
     """Create an assessment."""
     conn = get_connection()
-    cursor = conn.cursor()
+    try:
+        cursor = conn.cursor()
 
-    cursor.execute("""
-        INSERT INTO assessments (id, course_id, name, assessment_type,
-                                 total_points, total_questions, time_limit_seconds)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (assessment_id, course_id, name, assessment_type,
-          total_points, total_questions, time_limit_seconds))
+        cursor.execute("""
+            INSERT INTO assessments (id, course_id, name, assessment_type,
+                                     total_points, total_questions, time_limit_seconds)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (assessment_id, course_id, name, assessment_type,
+              total_points, total_questions, time_limit_seconds))
 
-    conn.commit()
-    conn.close()
+        conn.commit()
+        logger.info("Created assessment %s", assessment_id)
 
-    return {
-        "id": assessment_id,
-        "course_id": course_id,
-        "name": name,
-        "assessment_type": assessment_type,
-        "total_points": total_points,
-        "total_questions": total_questions
-    }
+        return {
+            "id": assessment_id,
+            "course_id": course_id,
+            "name": name,
+            "assessment_type": assessment_type,
+            "total_points": total_points,
+            "total_questions": total_questions
+        }
+    finally:
+        conn.close()
 
 
 def get_assessment(assessment_id: str) -> Optional[dict]:
     """Get assessment by ID."""
     conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT * FROM assessments WHERE id = ?", (assessment_id,))
-    row = cursor.fetchone()
-    conn.close()
-
-    return dict(row) if row else None
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM assessments WHERE id = ?", (assessment_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
 
 
 # ============================================================
@@ -408,37 +443,60 @@ def record_assessment_result(
     time_spent_seconds: int = None,
     question_results: list = None
 ) -> dict:
-    """Record a student's assessment result."""
+    """Record a student's assessment result. Allows retakes by updating existing results."""
     conn = get_connection()
-    cursor = conn.cursor()
+    try:
+        cursor = conn.cursor()
 
-    percentage = (points_earned / points_possible * 100) if points_possible > 0 else 0
+        percentage = (points_earned / points_possible * 100) if points_possible > 0 else 0
+        now = datetime.now(timezone.utc).isoformat()
 
-    cursor.execute("""
-        INSERT INTO assessment_results
-        (id, student_id, assessment_id, score, points_earned, points_possible,
-         percentage, time_spent_seconds, question_results, completed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (result_id, student_id, assessment_id, points_earned, points_earned,
-          points_possible, percentage, time_spent_seconds,
-          json.dumps(question_results) if question_results else None,
-          datetime.now().isoformat()))
+        try:
+            cursor.execute("""
+                INSERT INTO assessment_results
+                (id, student_id, assessment_id, score, points_earned, points_possible,
+                 percentage, time_spent_seconds, question_results, completed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (result_id, student_id, assessment_id, points_earned, points_earned,
+                  points_possible, percentage, time_spent_seconds,
+                  json.dumps(question_results) if question_results else None,
+                  now))
+        except sqlite3.IntegrityError:
+            # Retake: update existing result for this student+assessment
+            cursor.execute("""
+                UPDATE assessment_results SET
+                    score = ?, points_earned = ?, points_possible = ?,
+                    percentage = ?, time_spent_seconds = ?,
+                    question_results = ?, completed_at = ?
+                WHERE student_id = ? AND assessment_id = ?
+            """, (points_earned, points_earned, points_possible, percentage,
+                  time_spent_seconds,
+                  json.dumps(question_results) if question_results else None,
+                  now, student_id, assessment_id))
+            # Get the existing result_id for return
+            cursor.execute(
+                "SELECT id FROM assessment_results WHERE student_id = ? AND assessment_id = ?",
+                (student_id, assessment_id))
+            result_id = cursor.fetchone()["id"]
 
-    # Update topic mastery based on question results
-    if question_results:
-        _update_topic_mastery(cursor, student_id, question_results, result_id)
+        # Update topic mastery based on question results
+        if question_results:
+            _update_topic_mastery(cursor, student_id, question_results, result_id)
 
-    conn.commit()
-    conn.close()
+        conn.commit()
+        logger.info("Recorded result for student %s on assessment %s (%.1f%%)",
+                     student_id, assessment_id, percentage)
 
-    return {
-        "id": result_id,
-        "student_id": student_id,
-        "assessment_id": assessment_id,
-        "points_earned": points_earned,
-        "points_possible": points_possible,
-        "percentage": percentage
-    }
+        return {
+            "id": result_id,
+            "student_id": student_id,
+            "assessment_id": assessment_id,
+            "points_earned": points_earned,
+            "points_possible": points_possible,
+            "percentage": percentage
+        }
+    finally:
+        conn.close()
 
 
 def _update_topic_mastery(cursor, student_id: str, question_results: list, result_id: str):
@@ -469,15 +527,17 @@ def _update_topic_mastery(cursor, student_id: str, question_results: list, resul
               qr.get('difficulty'), qr.get('bloom_level')))
 
     # Update mastery for each topic
-    now = datetime.now().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
 
     for topic_id, stats in topic_stats.items():
-        # Get existing mastery record
+        recent_accuracy = stats['correct'] / stats['total'] if stats['total'] > 0 else 0
+
+        # Get existing mastery to calculate trend
         cursor.execute("""
-            SELECT * FROM topic_mastery
+            SELECT mastery_level, questions_attempted, questions_correct
+            FROM topic_mastery
             WHERE student_id = ? AND topic_id = ?
         """, (student_id, topic_id))
-
         existing = cursor.fetchone()
 
         if existing:
@@ -485,37 +545,34 @@ def _update_topic_mastery(cursor, student_id: str, question_results: list, resul
             new_correct = existing['questions_correct'] + stats['correct']
             new_mastery = new_correct / new_attempted if new_attempted > 0 else 0
 
-            # Calculate trend based on recent vs overall
-            recent_accuracy = stats['correct'] / stats['total'] if stats['total'] > 0 else 0
             if recent_accuracy > existing['mastery_level'] + 0.1:
                 trend = 'improving'
             elif recent_accuracy < existing['mastery_level'] - 0.1:
                 trend = 'declining'
             else:
                 trend = 'stable'
-
-            cursor.execute("""
-                UPDATE topic_mastery SET
-                    mastery_level = ?,
-                    questions_attempted = ?,
-                    questions_correct = ?,
-                    recent_accuracy = ?,
-                    trend = ?,
-                    last_attempt_at = ?,
-                    updated_at = ?
-                WHERE student_id = ? AND topic_id = ?
-            """, (new_mastery, new_attempted, new_correct, recent_accuracy,
-                  trend, now, now, student_id, topic_id))
         else:
-            mastery = stats['correct'] / stats['total'] if stats['total'] > 0 else 0
-            cursor.execute("""
-                INSERT INTO topic_mastery
-                (student_id, topic_id, mastery_level, questions_attempted,
-                 questions_correct, recent_accuracy, trend, first_attempt_at,
-                 last_attempt_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (student_id, topic_id, mastery, stats['total'], stats['correct'],
-                  mastery, 'stable', now, now, now))
+            new_attempted = stats['total']
+            new_correct = stats['correct']
+            new_mastery = recent_accuracy
+            trend = 'stable'
+
+        cursor.execute("""
+            INSERT INTO topic_mastery
+            (student_id, topic_id, mastery_level, questions_attempted,
+             questions_correct, recent_accuracy, trend, first_attempt_at,
+             last_attempt_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(student_id, topic_id) DO UPDATE SET
+                mastery_level = excluded.mastery_level,
+                questions_attempted = excluded.questions_attempted,
+                questions_correct = excluded.questions_correct,
+                recent_accuracy = excluded.recent_accuracy,
+                trend = excluded.trend,
+                last_attempt_at = excluded.last_attempt_at,
+                updated_at = excluded.updated_at
+        """, (student_id, topic_id, new_mastery, new_attempted, new_correct,
+              recent_accuracy, trend, now, now, now))
 
 
 # ============================================================
@@ -525,189 +582,352 @@ def _update_topic_mastery(cursor, student_id: str, question_results: list, resul
 def get_student_profile(student_id: str) -> Optional[dict]:
     """Get comprehensive student profile with performance data."""
     conn = get_connection()
-    cursor = conn.cursor()
+    try:
+        cursor = conn.cursor()
 
-    # Basic info
-    cursor.execute("SELECT * FROM students WHERE id = ?", (student_id,))
-    student = cursor.fetchone()
-    if not student:
+        # Basic info
+        cursor.execute("SELECT * FROM students WHERE id = ?", (student_id,))
+        student = cursor.fetchone()
+        if not student:
+            return None
+
+        profile = dict(student)
+
+        # Enrolled courses
+        cursor.execute("""
+            SELECT c.*, e.enrolled_at, e.status
+            FROM courses c
+            JOIN enrollments e ON e.course_id = c.id
+            WHERE e.student_id = ?
+        """, (student_id,))
+        profile['courses'] = [dict(row) for row in cursor.fetchall()]
+
+        # Overall statistics
+        cursor.execute("""
+            SELECT
+                COUNT(*) as total_assessments,
+                AVG(percentage) as avg_percentage,
+                SUM(points_earned) as total_points_earned,
+                SUM(points_possible) as total_points_possible,
+                SUM(time_spent_seconds) as total_time_spent
+            FROM assessment_results
+            WHERE student_id = ?
+        """, (student_id,))
+        stats = dict(cursor.fetchone())
+        profile['statistics'] = stats
+
+        # Recent assessments
+        cursor.execute("""
+            SELECT ar.*, a.name as assessment_name, a.assessment_type
+            FROM assessment_results ar
+            JOIN assessments a ON a.id = ar.assessment_id
+            WHERE ar.student_id = ?
+            ORDER BY ar.completed_at DESC
+            LIMIT 5
+        """, (student_id,))
+        profile['recent_assessments'] = [dict(row) for row in cursor.fetchall()]
+
+        return profile
+    finally:
         conn.close()
-        return None
-
-    profile = dict(student)
-
-    # Enrolled courses
-    cursor.execute("""
-        SELECT c.*, e.enrolled_at, e.status
-        FROM courses c
-        JOIN enrollments e ON e.course_id = c.id
-        WHERE e.student_id = ?
-    """, (student_id,))
-    profile['courses'] = [dict(row) for row in cursor.fetchall()]
-
-    # Overall statistics
-    cursor.execute("""
-        SELECT
-            COUNT(*) as total_assessments,
-            AVG(percentage) as avg_percentage,
-            SUM(points_earned) as total_points_earned,
-            SUM(points_possible) as total_points_possible,
-            SUM(time_spent_seconds) as total_time_spent
-        FROM assessment_results
-        WHERE student_id = ?
-    """, (student_id,))
-    stats = dict(cursor.fetchone())
-    profile['statistics'] = stats
-
-    # Recent assessments
-    cursor.execute("""
-        SELECT ar.*, a.name as assessment_name, a.assessment_type
-        FROM assessment_results ar
-        JOIN assessments a ON a.id = ar.assessment_id
-        WHERE ar.student_id = ?
-        ORDER BY ar.completed_at DESC
-        LIMIT 5
-    """, (student_id,))
-    profile['recent_assessments'] = [dict(row) for row in cursor.fetchall()]
-
-    conn.close()
-    return profile
 
 
 def get_topic_mastery(student_id: str, course_id: str = None) -> list:
     """Get topic mastery levels for a student."""
     conn = get_connection()
-    cursor = conn.cursor()
+    try:
+        cursor = conn.cursor()
 
-    query = """
-        SELECT tm.*, t.name as topic_name, t.course_id, c.name as course_name
-        FROM topic_mastery tm
-        JOIN topics t ON t.id = tm.topic_id
-        JOIN courses c ON c.id = t.course_id
-        WHERE tm.student_id = ?
-    """
-    params = [student_id]
+        query = """
+            SELECT tm.*, t.name as topic_name, t.course_id, c.name as course_name
+            FROM topic_mastery tm
+            JOIN topics t ON t.id = tm.topic_id
+            JOIN courses c ON c.id = t.course_id
+            WHERE tm.student_id = ?
+        """
+        params = [student_id]
 
-    if course_id:
-        query += " AND t.course_id = ?"
-        params.append(course_id)
+        if course_id:
+            query += " AND t.course_id = ?"
+            params.append(course_id)
 
-    query += " ORDER BY tm.mastery_level ASC"
+        query += " ORDER BY tm.mastery_level ASC"
 
-    cursor.execute(query, params)
-    rows = cursor.fetchall()
-    conn.close()
-
-    return [dict(row) for row in rows]
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
 
 
 def get_learning_gaps(student_id: str, threshold: float = 0.7) -> list:
     """Identify topics where student is below mastery threshold."""
     conn = get_connection()
-    cursor = conn.cursor()
+    try:
+        cursor = conn.cursor()
 
-    cursor.execute("""
-        SELECT tm.*, t.name as topic_name, c.name as course_name
-        FROM topic_mastery tm
-        JOIN topics t ON t.id = tm.topic_id
-        JOIN courses c ON c.id = t.course_id
-        WHERE tm.student_id = ? AND tm.mastery_level < ?
-        ORDER BY tm.mastery_level ASC
-    """, (student_id, threshold))
+        cursor.execute("""
+            SELECT tm.*, t.name as topic_name, c.name as course_name
+            FROM topic_mastery tm
+            JOIN topics t ON t.id = tm.topic_id
+            JOIN courses c ON c.id = t.course_id
+            WHERE tm.student_id = ? AND tm.mastery_level < ?
+            ORDER BY tm.mastery_level ASC
+        """, (student_id, threshold))
 
-    rows = cursor.fetchall()
-    conn.close()
-
-    return [dict(row) for row in rows]
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
 
 
 def get_student_history(student_id: str, topic_id: str = None,
                         limit: int = 50) -> list:
     """Get detailed question-level history for a student."""
     conn = get_connection()
-    cursor = conn.cursor()
+    try:
+        cursor = conn.cursor()
 
-    query = """
-        SELECT qh.*, t.name as topic_name
-        FROM question_history qh
-        LEFT JOIN topics t ON t.id = qh.topic_id
-        WHERE qh.student_id = ?
-    """
-    params = [student_id]
+        query = """
+            SELECT qh.*, t.name as topic_name
+            FROM question_history qh
+            LEFT JOIN topics t ON t.id = qh.topic_id
+            WHERE qh.student_id = ?
+        """
+        params = [student_id]
 
-    if topic_id:
-        query += " AND qh.topic_id = ?"
-        params.append(topic_id)
+        if topic_id:
+            query += " AND qh.topic_id = ?"
+            params.append(topic_id)
 
-    query += " ORDER BY qh.attempted_at DESC LIMIT ?"
-    params.append(limit)
+        query += " ORDER BY qh.attempted_at DESC LIMIT ?"
+        params.append(limit)
 
-    cursor.execute(query, params)
-    rows = cursor.fetchall()
-    conn.close()
-
-    return [dict(row) for row in rows]
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
 
 
 def get_class_analytics(course_id: str) -> dict:
     """Get class-wide analytics for a course."""
     conn = get_connection()
-    cursor = conn.cursor()
+    try:
+        cursor = conn.cursor()
 
-    # Overall class performance
-    cursor.execute("""
-        SELECT
-            COUNT(DISTINCT ar.student_id) as students_assessed,
-            COUNT(ar.id) as total_assessments,
-            AVG(ar.percentage) as avg_percentage,
-            MIN(ar.percentage) as min_percentage,
-            MAX(ar.percentage) as max_percentage
-        FROM assessment_results ar
-        JOIN assessments a ON a.id = ar.assessment_id
-        WHERE a.course_id = ?
-    """, (course_id,))
-    overall = dict(cursor.fetchone())
+        # Overall class performance
+        cursor.execute("""
+            SELECT
+                COUNT(DISTINCT ar.student_id) as students_assessed,
+                COUNT(ar.id) as total_assessments,
+                AVG(ar.percentage) as avg_percentage,
+                MIN(ar.percentage) as min_percentage,
+                MAX(ar.percentage) as max_percentage
+            FROM assessment_results ar
+            JOIN assessments a ON a.id = ar.assessment_id
+            WHERE a.course_id = ?
+        """, (course_id,))
+        overall = dict(cursor.fetchone())
 
-    # Performance by topic
-    cursor.execute("""
-        SELECT
-            t.id, t.name,
-            AVG(tm.mastery_level) as avg_mastery,
-            COUNT(tm.student_id) as students_attempted,
-            SUM(CASE WHEN tm.mastery_level < 0.7 THEN 1 ELSE 0 END) as struggling_count
-        FROM topics t
-        LEFT JOIN topic_mastery tm ON tm.topic_id = t.id
-        WHERE t.course_id = ?
-        GROUP BY t.id
-        ORDER BY avg_mastery ASC
-    """, (course_id,))
-    by_topic = [dict(row) for row in cursor.fetchall()]
+        # Performance by topic
+        cursor.execute("""
+            SELECT
+                t.id, t.name,
+                AVG(tm.mastery_level) as avg_mastery,
+                COUNT(tm.student_id) as students_attempted,
+                SUM(CASE WHEN tm.mastery_level < 0.7 THEN 1 ELSE 0 END) as struggling_count
+            FROM topics t
+            LEFT JOIN topic_mastery tm ON tm.topic_id = t.id
+            WHERE t.course_id = ?
+            GROUP BY t.id
+            ORDER BY avg_mastery ASC
+        """, (course_id,))
+        by_topic = [dict(row) for row in cursor.fetchall()]
 
-    # Grade distribution
-    cursor.execute("""
-        SELECT
-            CASE
-                WHEN ar.percentage >= 90 THEN 'A'
-                WHEN ar.percentage >= 80 THEN 'B'
-                WHEN ar.percentage >= 70 THEN 'C'
-                WHEN ar.percentage >= 60 THEN 'D'
-                ELSE 'F'
-            END as grade,
-            COUNT(*) as count
-        FROM assessment_results ar
-        JOIN assessments a ON a.id = ar.assessment_id
-        WHERE a.course_id = ?
-        GROUP BY grade
-        ORDER BY grade
-    """, (course_id,))
-    grade_dist = {row['grade']: row['count'] for row in cursor.fetchall()}
+        # Grade distribution
+        cursor.execute("""
+            SELECT
+                CASE
+                    WHEN ar.percentage >= 90 THEN 'A'
+                    WHEN ar.percentage >= 80 THEN 'B'
+                    WHEN ar.percentage >= 70 THEN 'C'
+                    WHEN ar.percentage >= 60 THEN 'D'
+                    ELSE 'F'
+                END as grade,
+                COUNT(*) as count
+            FROM assessment_results ar
+            JOIN assessments a ON a.id = ar.assessment_id
+            WHERE a.course_id = ?
+            GROUP BY grade
+            ORDER BY grade
+        """, (course_id,))
+        grade_dist = {row['grade']: row['count'] for row in cursor.fetchall()}
 
-    conn.close()
+        return {
+            "overall": overall,
+            "by_topic": by_topic,
+            "grade_distribution": grade_dist
+        }
+    finally:
+        conn.close()
 
-    return {
-        "overall": overall,
-        "by_topic": by_topic,
-        "grade_distribution": grade_dist
-    }
 
+# ============================================================
+# ENROLLMENT CHECK
+# ============================================================
+
+def check_enrollment(student_id: str, assessment_id: str) -> bool:
+    """Check if a student is enrolled in the course for a given assessment."""
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT 1 FROM enrollments e
+            JOIN assessments a ON a.course_id = e.course_id
+            WHERE e.student_id = ? AND a.id = ? AND e.status = 'active'
+        """, (student_id, assessment_id))
+        return cursor.fetchone() is not None
+    finally:
+        conn.close()
+
+
+# ============================================================
+# UPDATE / DELETE OPERATIONS
+# ============================================================
+
+def update_student(student_id: str, name: str = None, email: str = None,
+                   grade_level: str = None) -> Optional[dict]:
+    """Update an existing student's fields."""
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT * FROM students WHERE id = ?", (student_id,))
+        existing = cursor.fetchone()
+        if not existing:
+            return None
+
+        updated_name = name if name is not None else existing["name"]
+        updated_email = email if email is not None else existing["email"]
+        updated_grade = grade_level if grade_level is not None else existing["grade_level"]
+        now = datetime.now(timezone.utc).isoformat()
+
+        cursor.execute("""
+            UPDATE students SET name = ?, email = ?, grade_level = ?, updated_at = ?
+            WHERE id = ?
+        """, (updated_name, updated_email, updated_grade, now, student_id))
+
+        conn.commit()
+        logger.info("Updated student %s", student_id)
+
+        return {
+            "id": student_id,
+            "name": updated_name,
+            "email": updated_email,
+            "grade_level": updated_grade,
+        }
+    finally:
+        conn.close()
+
+
+def update_course(course_id: str, name: str = None, subject: str = None,
+                  grade_level: str = None) -> Optional[dict]:
+    """Update an existing course's fields."""
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT * FROM courses WHERE id = ?", (course_id,))
+        existing = cursor.fetchone()
+        if not existing:
+            return None
+
+        updated_name = name if name is not None else existing["name"]
+        updated_subject = subject if subject is not None else existing["subject"]
+        updated_grade = grade_level if grade_level is not None else existing["grade_level"]
+
+        cursor.execute("""
+            UPDATE courses SET name = ?, subject = ?, grade_level = ?
+            WHERE id = ?
+        """, (updated_name, updated_subject, updated_grade, course_id))
+
+        conn.commit()
+        logger.info("Updated course %s", course_id)
+
+        return {
+            "id": course_id,
+            "name": updated_name,
+            "subject": updated_subject,
+            "grade_level": updated_grade,
+        }
+    finally:
+        conn.close()
+
+
+def delete_student(student_id: str) -> bool:
+    """Delete a student and all related data (CASCADE)."""
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM students WHERE id = ?", (student_id,))
+        conn.commit()
+        deleted = cursor.rowcount > 0
+        if deleted:
+            logger.info("Deleted student %s", student_id)
+        return deleted
+    finally:
+        conn.close()
+
+
+def delete_course(course_id: str) -> bool:
+    """Delete a course and all related data (CASCADE)."""
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM courses WHERE id = ?", (course_id,))
+        conn.commit()
+        deleted = cursor.rowcount > 0
+        if deleted:
+            logger.info("Deleted course %s", course_id)
+        return deleted
+    finally:
+        conn.close()
+
+
+def unenroll_student(student_id: str, course_id: str) -> bool:
+    """Remove a student's enrollment from a course."""
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            DELETE FROM enrollments
+            WHERE student_id = ? AND course_id = ?
+        """, (student_id, course_id))
+        conn.commit()
+        deleted = cursor.rowcount > 0
+        if deleted:
+            logger.info("Unenrolled student %s from course %s", student_id, course_id)
+        return deleted
+    finally:
+        conn.close()
+
+
+def list_assessments(course_id: str) -> list:
+    """List all assessments for a course."""
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT a.*, COUNT(ar.id) as results_count
+            FROM assessments a
+            LEFT JOIN assessment_results ar ON ar.assessment_id = a.id
+            WHERE a.course_id = ?
+            GROUP BY a.id
+            ORDER BY a.created_at DESC
+        """, (course_id,))
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
 

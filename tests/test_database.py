@@ -9,10 +9,9 @@ import pytest
 _tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 _tmp.close()
 
-import src.student_progress.database as db
+os.environ["STUDENT_PROGRESS_DB"] = _tmp.name
 
-db.DATABASE_PATH = type(db.DATABASE_PATH)(_tmp.name)
-db.init_database()
+import src.student_progress.database as db
 
 
 @pytest.fixture(autouse=True)
@@ -58,6 +57,13 @@ def sample_assessment(sample_course):
     )
 
 
+@pytest.fixture()
+def enrolled_student(sample_student, sample_course):
+    """Student enrolled in the sample course."""
+    db.enroll_student("stu-001", "course-001")
+    return sample_student
+
+
 class TestStudentOperations:
     def test_create_student(self):
         student = db.create_student("stu-test", "Bob Smith", "bob@school.edu", "10th Grade")
@@ -79,12 +85,39 @@ class TestStudentOperations:
         assert len(students) == 1
         assert students[0]["name"] == "Alice Johnson"
 
-    def test_list_students_by_course(self, sample_student, sample_course):
-        db.enroll_student("stu-001", "course-001")
+    def test_list_students_by_course(self, enrolled_student, sample_course):
         students = db.list_students("course-001")
         assert len(students) == 1
 
     def test_list_students_empty_course(self, sample_course):
+        students = db.list_students("course-001")
+        assert len(students) == 0
+
+
+class TestStudentCRUD:
+    def test_update_student_name(self, sample_student):
+        updated = db.update_student("stu-001", name="Alice Smith")
+        assert updated is not None
+        assert updated["name"] == "Alice Smith"
+        assert updated["email"] == "alice@school.edu"
+
+    def test_update_student_email(self, sample_student):
+        updated = db.update_student("stu-001", email="new@school.edu")
+        assert updated["email"] == "new@school.edu"
+        assert updated["name"] == "Alice Johnson"
+
+    def test_update_student_not_found(self):
+        assert db.update_student("nonexistent", name="X") is None
+
+    def test_delete_student(self, sample_student):
+        assert db.delete_student("stu-001") is True
+        assert db.get_student("stu-001") is None
+
+    def test_delete_student_not_found(self):
+        assert db.delete_student("nonexistent") is False
+
+    def test_delete_student_cascades_enrollment(self, enrolled_student, sample_course):
+        db.delete_student("stu-001")
         students = db.list_students("course-001")
         assert len(students) == 0
 
@@ -116,6 +149,36 @@ class TestCourseOperations:
         assert db.enroll_student("stu-001", "course-001") is False
 
 
+class TestCourseCRUD:
+    def test_update_course_name(self, sample_course):
+        updated = db.update_course("course-001", name="Algebra II")
+        assert updated is not None
+        assert updated["name"] == "Algebra II"
+        assert updated["subject"] == "Mathematics"
+
+    def test_update_course_subject(self, sample_course):
+        updated = db.update_course("course-001", subject="Science")
+        assert updated["subject"] == "Science"
+
+    def test_update_course_not_found(self):
+        assert db.update_course("nonexistent", name="X") is None
+
+    def test_delete_course(self, sample_course):
+        assert db.delete_course("course-001") is True
+        assert db.get_course("course-001") is None
+
+    def test_delete_course_not_found(self):
+        assert db.delete_course("nonexistent") is False
+
+    def test_unenroll_student(self, enrolled_student, sample_course):
+        assert db.unenroll_student("stu-001", "course-001") is True
+        students = db.list_students("course-001")
+        assert len(students) == 0
+
+    def test_unenroll_student_not_enrolled(self, sample_student, sample_course):
+        assert db.unenroll_student("stu-001", "course-001") is False
+
+
 class TestTopicOperations:
     def test_create_topic(self, sample_course):
         topic = db.create_topic("t-test", "course-001", "Quadratic Equations", weight=1.5)
@@ -141,9 +204,19 @@ class TestAssessmentOperations:
         assert assessment is not None
         assert assessment["assessment_type"] == "quiz"
 
+    def test_list_assessments(self, sample_assessment):
+        assessments = db.list_assessments("course-001")
+        assert len(assessments) == 1
+        assert assessments[0]["name"] == "Chapter 1 Quiz"
+        assert assessments[0]["results_count"] == 0
+
+    def test_list_assessments_empty(self, sample_course):
+        assessments = db.list_assessments("course-001")
+        assert len(assessments) == 0
+
 
 class TestResultRecording:
-    def test_record_result(self, sample_student, sample_assessment):
+    def test_record_result(self, enrolled_student, sample_assessment):
         result = db.record_assessment_result(
             "result-001", "stu-001", "assess-001",
             points_earned=85, points_possible=100,
@@ -151,7 +224,7 @@ class TestResultRecording:
         assert result["percentage"] == 85.0
 
     def test_record_result_with_questions(
-        self, sample_student, sample_assessment, sample_topic
+        self, enrolled_student, sample_assessment, sample_topic
     ):
         result = db.record_assessment_result(
             "result-002", "stu-001", "assess-001",
@@ -185,15 +258,36 @@ class TestResultRecording:
         assert mastery[0]["questions_attempted"] == 3
         assert mastery[0]["questions_correct"] == 2
 
+    def test_retake_updates_existing(self, enrolled_student, sample_assessment):
+        db.record_assessment_result(
+            "result-001", "stu-001", "assess-001",
+            points_earned=70, points_possible=100,
+        )
+        # Retake with a new result_id - should update existing row
+        result = db.record_assessment_result(
+            "result-002", "stu-001", "assess-001",
+            points_earned=90, points_possible=100,
+        )
+        assert result["percentage"] == 90.0
+        # The ID should be the original result's ID
+        assert result["id"] == "result-001"
+
+
+class TestEnrollmentCheck:
+    def test_check_enrollment_enrolled(self, enrolled_student, sample_assessment):
+        assert db.check_enrollment("stu-001", "assess-001") is True
+
+    def test_check_enrollment_not_enrolled(self, sample_student, sample_assessment):
+        assert db.check_enrollment("stu-001", "assess-001") is False
+
 
 class TestAnalytics:
-    def test_get_student_profile(self, sample_student, sample_course):
-        db.enroll_student("stu-001", "course-001")
+    def test_get_student_profile(self, enrolled_student, sample_course):
         profile = db.get_student_profile("stu-001")
         assert profile["name"] == "Alice Johnson"
         assert len(profile["courses"]) == 1
 
-    def test_get_learning_gaps(self, sample_student, sample_assessment, sample_topic):
+    def test_get_learning_gaps(self, enrolled_student, sample_assessment, sample_topic):
         db.record_assessment_result(
             "result-gap", "stu-001", "assess-001",
             points_earned=50, points_possible=100,
@@ -207,7 +301,7 @@ class TestAnalytics:
         assert len(gaps) == 1
         assert gaps[0]["topic_name"] == "Linear Equations"
 
-    def test_get_student_history(self, sample_student, sample_assessment, sample_topic):
+    def test_get_student_history(self, enrolled_student, sample_assessment, sample_topic):
         db.record_assessment_result(
             "result-hist", "stu-001", "assess-001",
             points_earned=80, points_possible=100,
@@ -219,8 +313,7 @@ class TestAnalytics:
         assert len(history) == 1
         assert history[0]["is_correct"] == 1
 
-    def test_get_class_analytics(self, sample_student, sample_course, sample_assessment):
-        db.enroll_student("stu-001", "course-001")
+    def test_get_class_analytics(self, enrolled_student, sample_course, sample_assessment):
         db.record_assessment_result(
             "result-class", "stu-001", "assess-001",
             points_earned=88, points_possible=100,
@@ -228,6 +321,27 @@ class TestAnalytics:
         analytics = db.get_class_analytics("course-001")
         assert analytics["overall"]["students_assessed"] == 1
         assert analytics["overall"]["avg_percentage"] == 88.0
+
+
+class TestDatabaseConfig:
+    def test_wal_mode(self):
+        conn = db.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA journal_mode")
+            mode = cursor.fetchone()[0]
+            assert mode == "wal"
+        finally:
+            conn.close()
+
+    def test_foreign_keys_enabled(self):
+        conn = db.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA foreign_keys")
+            assert cursor.fetchone()[0] == 1
+        finally:
+            conn.close()
 
 
 def teardown_module():
