@@ -6,6 +6,8 @@ MCP server for AI-powered student progress tracking and learning analytics. Conn
 [![MCP](https://img.shields.io/badge/MCP-1.0+-green)](https://modelcontextprotocol.io)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
+Part of [AdaptiveTest developer API](https://adaptivetest.io/developers), built by Desert's Edge Solutions.
+
 ## What is MCP?
 
 [Model Context Protocol (MCP)](https://modelcontextprotocol.io) is an open standard that lets AI assistants like Claude connect to external tools and data sources. This server exposes student progress tracking as MCP tools that Claude can call directly during conversations.
